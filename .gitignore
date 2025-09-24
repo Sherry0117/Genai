@@ -1,0 +1,9 @@
+# Python / uv
+__pycache__/
+*.pyc
+.venv/
+.python-version
+.env
+
+# macOS
+.DS_Store
