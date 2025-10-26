@@ -28,6 +28,17 @@ A comprehensive project combining FastAPI text generation/embeddings with a neur
   - **Request Body**: `{"text": "This is an example.", "pooling": "mean"}` (pooling: "mean" or "tokens")
   - **Response**: `{"vector": [0.1, 0.2, ...], "dim": 300}` or `{"tokens": [...], "vectors": [...], "dim": 300}`
 
+### GAN Image Generation (Assignment 3)
+- `POST /generate_image` - Generate handwritten digit images using trained GAN model
+  - **Request Body**: `{"num_images": 1, "seed": 42}`
+  - **Response**: `{"num_images": 1, "images": ["base64_encoded_png..."], "format": "base64_png"}`
+  - **Note**: Requires trained GAN model at `models/gan_generator.pth`
+
+### CNN Image Classification
+- `POST /classify_image` - Classify images using trained CNN model
+  - **Request Body**: `{"image": "base64_encoded_image", "top_k": 5}`
+  - **Response**: `{"predictions": [{"class": "cat", "confidence": 0.95, ...}], "top_k": 5}`
+
 ### Health Check
 - `GET /` - Basic health check endpoint
 
@@ -43,15 +54,24 @@ sps_genai/
 ├── helper_lib/              # Neural network helper library
 │   ├── __init__.py
 │   ├── data_loader.py       # Data loading utilities
-│   ├── trainer.py           # Training functions (including VAE, WGAN)
+│   ├── trainer.py           # Training functions (including VAE, WGAN, GAN)
 │   ├── evaluator.py         # Model evaluation utilities
 │   ├── model.py             # Neural network model definitions
 │   ├── utils.py             # Utility functions
 │   └── README.md            # Helper library documentation
 ├── api/                     # Additional API endpoints
 │   └── main.py
+├── models/                  # Trained model weights and outputs
+│   ├── gan_generator.pth    # Trained GAN generator
+│   ├── generated_samples_epoch_20.png
+│   └── training_losses.png
+├── data/                    # Dataset storage
+│   └── MNIST/
 ├── example_usage.py         # Example usage of helper library
 ├── train.py                 # Training script for CNN assignments
+├── train_gan.py            # GAN training script
+├── simple_train_gan.py      # Simplified GAN training script
+├── test_gan.py             # GAN testing script
 ├── Dockerfile               # Container configuration
 ├── pyproject.toml          # Project dependencies and metadata
 ├── requirements.txt        # Python package requirements
@@ -119,6 +139,32 @@ curl -X POST http://127.0.0.1:8000/embed \
   -d '{"text": "This is an example sentence.", "pooling": "tokens"}'
 ```
 
+### GAN Image Generation
+```bash
+# Generate 1 image with random seed
+curl -X POST http://127.0.0.1:8000/generate_image \
+  -H "Content-Type: application/json" \
+  -d '{"num_images": 1, "seed": 42}'
+
+# Save generated image to file
+python3 << 'EOF'
+import requests
+import base64
+from PIL import Image
+from io import BytesIO
+
+response = requests.post(
+    'http://127.0.0.1:8000/generate_image',
+    json={"num_images": 1, "seed": 42}
+)
+data = response.json()
+img_data = base64.b64decode(data['images'][0])
+img = Image.open(BytesIO(img_data))
+img.save('generated_digit.png')
+print("Saved to generated_digit.png")
+EOF
+```
+
 ## Docker Deployment
 
 ### Build and Run
@@ -173,11 +219,30 @@ The `helper_lib` provides a comprehensive toolkit for neural network projects:
 - **EnhancedCNN**: CNN with Batch Normalization and advanced features
 - **VAE**: Variational Autoencoder for generative modeling
 - **WGAN**: Wasserstein GAN implementation
+- **GANGenerator & GANDiscriminator**: GAN models for MNIST digit generation
 
 ### Training Functions
 - `train_model()`: Standard neural network training
 - `train_vae_model()`: VAE-specific training with KL divergence
 - `train_wgan()`: Wasserstein GAN training with gradient penalty
+- `train_gan()`: GAN training for MNIST digit generation
+
+### Training the GAN Model (Assignment 3)
+To train your own GAN model on MNIST:
+
+```bash
+# Train GAN model (saves to models/gan_generator.pth)
+python train_gan.py
+
+# Or use the simplified version
+python simple_train_gan.py
+```
+
+The training will:
+- Download MNIST dataset automatically
+- Train for 20 epochs (configurable)
+- Save trained generator to `models/gan_generator.pth`
+- Generate sample images and loss curves in `models/` directory
 
 ### Usage Example
 ```python

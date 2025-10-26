@@ -12,18 +12,11 @@ Modules:
 - utils: General utility functions
 """
 
-from .data_loader import get_data_loader
+from .data_loader import get_data_loader, get_mnist_loader, get_cifar10_loader
 from .trainer import train_model
 from .evaluator import evaluate_model
-from .model import FCNN, CNN, EnhancedCNN, get_model
-from .utils import (
-    count_parameters, 
-    get_optimizer, 
-    get_criterion, 
-    plot_training_history, 
-    save_model, 
-    load_model
-)
+from .model import SimpleFCNN, SimpleCNN, EnhancedCNN, SpecifiedCNN, GANGenerator, GANDiscriminator, get_model
+from .utils import get_optimizer, get_criterion, count_parameters, plot_training_history
 
 __version__ = "0.1.0"
 __author__ = "SPS GenAI"
