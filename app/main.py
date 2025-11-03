@@ -2,7 +2,7 @@ import os
 import torch
 import torch.nn as nn
 import torchvision.transforms
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Path
 from pydantic import BaseModel
 
 app = FastAPI()
@@ -101,6 +101,44 @@ def generate_with_rnn(request: TextGenerationRequest):
     return {"generated_text": generated}
 
 
+# ========== Module 9: LLM Fine-tuning Endpoint ==========
+@app.post("/generate_with_llm")
+def generate_with_llm_endpoint(request: TextGenerationRequest):
+    """Generate text using fine-tuned GPT-2 model (Module 9).
+    
+    This endpoint uses the fine-tuned GPT-2 model trained on the Nectar Q&A dataset.
+    The model is capable of generating text based on prompts in a conversational format.
+    
+    Args:
+        request: Contains start_word (prompt) and length (max generation length)
+        
+    Returns:
+        Dictionary with generated text
+    """
+    try:
+        from helper_lib.llm_generator import generate_text_with_llm
+        
+        # Load fine-tuned model and generate text
+        generated_text = generate_text_with_llm(
+            prompt=request.start_word,
+            model_path='models/gpt2_finetuned/final_model',
+            max_length=request.length,
+            device=gan_device.type  # Reuse the device variable
+        )
+        
+        return {
+            "generated_text": generated_text,
+            "prompt": request.start_word,
+            "length": request.length
+        }
+    except Exception as e:
+        return {
+            "error": f"Failed to generate text with LLM: {str(e)}",
+            "prompt": request.start_word,
+            "note": "Make sure the model is trained first by running: python train_llm.py"
+        }
+
+
 # ---- Embedding endpoint (spaCy) ----
 import spacy
 
@@ -143,6 +181,9 @@ def embed(req: EmbedRequest):
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from helper_lib.model import GANGenerator, SpecifiedCNN
+from helper_lib.energy_model import EnergyModel
+from helper_lib.model import get_model, DiffusionModel
+from helper_lib.generator import generate_energy_samples, generate_diffusion_samples
 import base64
 from io import BytesIO
 from PIL import Image
@@ -320,3 +361,94 @@ def get_cnn_info():
         "classes": CIFAR10_CLASSES,
         "parameters": sum(p.numel() for p in classifier.parameters() if p.requires_grad)
     }
+
+
+# ---- Energy/Diffusion Model Endpoints (merged from api/app.py) ----
+def _tensor_grid_to_base64(images: torch.Tensor, nrow: int = 4) -> str:
+    from torchvision.utils import make_grid
+    import torchvision.transforms as T
+    grid = make_grid(images.clamp(0.0, 1.0).cpu(), nrow=nrow, padding=2)
+    to_pil = T.ToPILImage(mode='RGB') if grid.shape[0] == 3 else T.ToPILImage()
+    pil_img = to_pil(grid)
+    bio = BytesIO()
+    pil_img.save(bio, format='PNG')
+    bio.seek(0)
+    return base64.b64encode(bio.read()).decode('utf-8')
+
+
+class GenerateRequestED(BaseModel):
+    num_samples: int = 16
+    seed: int | None = None
+
+
+class _EDModelManager:
+    def __init__(self):
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.models = {}
+
+        # EnergyModel
+        energy_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'energy', 'energy_final.pt')
+        energy_model = EnergyModel().to(self.device)
+        if os.path.exists(energy_path):
+            energy_model.load_state_dict(torch.load(energy_path, map_location=self.device))
+        energy_model.eval()
+        self.models['energy'] = energy_model
+
+        # DiffusionModel (prefer EMA if available)
+        diffusion_model: DiffusionModel = get_model('diffusion', device=self.device, image_size=64, num_channels=3)
+        diffusion_ckpt = os.path.join(os.path.dirname(__file__), '..', 'models', 'diffusion', 'diffusion_final.pth')
+        if os.path.exists(diffusion_ckpt):
+            ckpt = torch.load(diffusion_ckpt, map_location=self.device)
+            if 'ema_model_state_dict' in ckpt:
+                diffusion_model.ema_network.load_state_dict(ckpt['ema_model_state_dict'])
+            if 'model_state_dict' in ckpt:
+                diffusion_model.network.load_state_dict(ckpt['model_state_dict'])
+        diffusion_model.eval()
+        self.models['diffusion'] = diffusion_model
+
+    def list_models(self):
+        return sorted(self.models.keys())
+
+    def _seed(self, seed: int | None):
+        if seed is None:
+            return
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+    def generate(self, model_type: str, num_samples: int, seed: int | None):
+        mtype = (model_type or '').lower()
+        if mtype not in self.models:
+            raise KeyError(f"Unknown model_type: {model_type}")
+        self._seed(seed)
+        if mtype == 'energy':
+            return generate_energy_samples(self.models['energy'], self.device, num_samples=num_samples)
+        if mtype == 'diffusion':
+            return generate_diffusion_samples(self.models['diffusion'], self.device, num_samples=num_samples)
+        raise KeyError(f"Unsupported model_type: {model_type}")
+
+
+_ed_manager = _EDModelManager()
+
+
+@app.get("/health")
+def health_ed():
+    return {"status": "ok"}
+
+
+@app.get("/models")
+def list_models_ed():
+    return {"models": _ed_manager.list_models()}
+
+
+@app.post("/generate/{model_type}")
+def generate_ed(model_type: str = Path(..., description="energy or diffusion"), body: GenerateRequestED | None = None):
+    body = body or GenerateRequestED()
+    try:
+        images = _ed_manager.generate(model_type=model_type, num_samples=body.num_samples, seed=body.seed)
+    except KeyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Generation error: {e}")
+    b64 = _tensor_grid_to_base64(images, nrow=max(1, int(body.num_samples ** 0.5)))
+    return {"image_base64": b64, "num_samples": body.num_samples, "model_type": model_type}

@@ -7,3 +7,14 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# ignore datasets & large artifacts
+data/
+models/
+samples/
+*.tar.gz
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.npy
