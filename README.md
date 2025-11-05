@@ -78,9 +78,11 @@ Genai/
 │   ├── gan_generator.pth    # Trained GAN generator
 │   ├── energy/              # Energy Model checkpoints
 │   └── diffusion/           # Diffusion Model checkpoints
-├── samples/                 # Generated sample images
+├── samples/                 # Generated sample images (not tracked in git)
 │   ├── energy/              # Energy Model samples
 │   └── diffusion/           # Diffusion Model samples
+├── examples/                 # Example generated samples (tracked in git)
+│   └── diffusion_samples_epoch_15.png  # Best diffusion model samples
 ├── data/                    # Dataset storage
 │   └── CIFAR10/
 ├── example_usage.py         # Example usage of helper library

@@ -18,3 +18,9 @@ samples/
 *.ckpt
 *.npz
 *.npy
+
+# Allow examples/ directory (for showcasing good results)
+!examples/
+
+# Allow evaluation_outputs/ directory (for evaluation results)
+!evaluation_outputs/
