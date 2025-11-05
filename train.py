@@ -64,7 +64,7 @@ def evaluate(model: nn.Module, data_loader: DataLoader, device: torch.device):
 
 
 def train(num_epochs: int = 3, lr: float = 1e-3, data_dir: str = "./data", artifacts_dir: str = "artifacts"):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     train_loader, test_loader = get_dataloaders(data_dir=data_dir, batch_size=128, num_workers=2)

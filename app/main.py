@@ -190,7 +190,7 @@ from PIL import Image
 
 # Initialize GAN Generator
 gan_generator = None
-gan_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+gan_device = torch.device('mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu')
 
 def load_gan_generator():
     """Load pre-trained GAN generator model."""
@@ -263,7 +263,7 @@ def generate_image(request: ImageGenerationRequest):
 # ---- CNN Image Classification ----
 # Initialize CNN Classifier
 cnn_classifier = None
-cnn_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+cnn_device = torch.device('mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu')
 
 def load_cnn_classifier():
     """Load pre-trained CNN classifier model."""
@@ -383,7 +383,7 @@ class GenerateRequestED(BaseModel):
 
 class _EDModelManager:
     def __init__(self):
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
         self.models = {}
 
         # EnergyModel
@@ -415,6 +415,8 @@ class _EDModelManager:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
+        elif torch.backends.mps.is_available():
+            torch.mps.manual_seed(seed)
 
     def generate(self, model_type: str, num_samples: int, seed: int | None):
         mtype = (model_type or '').lower()

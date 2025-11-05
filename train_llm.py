@@ -44,7 +44,7 @@ def print_model_info(model):
 def main():
     """Main training function."""
     # Set device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     print("=" * 60)
     

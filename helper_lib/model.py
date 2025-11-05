@@ -102,17 +102,23 @@ def get_model(model_name, num_classes=10, device='cpu', **kwargs):
     elif name in ("diffusion", "diffusionmodel"):
         image_size = kwargs.get('image_size', 64)
         num_channels = kwargs.get('num_channels', 3)
-        schedule = kwargs.get('schedule', 'cosine')  # 'linear', 'cosine', 'offset_cosine'
+        schedule = kwargs.get('schedule', 'cosine')  # 'linear', 'cosine', 'offset_cosine', 'ddpm_cosine', 'legacy_cosine'
         
         # Select diffusion schedule function
+        # Default 'cosine' now uses standard DDPM cosine schedule (diffusion_cosine_schedule)
         if schedule == 'linear':
             schedule_fn = linear_diffusion_schedule
-        elif schedule == 'cosine':
+        elif schedule == 'cosine' or schedule == 'ddpm_cosine' or schedule == 'ddpm':
+            # Standard DDPM cosine schedule (recommended, now default)
+            schedule_fn = diffusion_cosine_schedule
+        elif schedule == 'legacy_cosine':
+            # Legacy cosine schedule (kept for backward compatibility)
             schedule_fn = cosine_diffusion_schedule
         elif schedule == 'offset_cosine':
             schedule_fn = offset_cosine_diffusion_schedule
         else:
-            schedule_fn = cosine_diffusion_schedule
+            # Default to standard DDPM cosine schedule
+            schedule_fn = diffusion_cosine_schedule
         
         unet = UNet(image_size=image_size, num_channels=num_channels)
         model = DiffusionModel(unet, schedule_fn)
@@ -477,9 +483,63 @@ def linear_diffusion_schedule(diffusion_times, min_rate=1e-4, max_rate=0.02):
 
 
 def cosine_diffusion_schedule(diffusion_times):
-    """Cosine diffusion schedule"""
+    """
+    Cosine diffusion schedule - LEGACY (deprecated, use diffusion_cosine_schedule instead)
+    This function satisfies sin² + cos² = 1, but doesn't follow standard DDPM formulation.
+    """
     signal_rates = torch.cos(diffusion_times * math.pi / 2)
     noise_rates = torch.sin(diffusion_times * math.pi / 2)
+    return noise_rates, signal_rates
+
+
+def diffusion_cosine_schedule(diffusion_times):
+    """
+    Standard DDPM cosine noise schedule
+    
+    This follows the standard DDPM formulation where:
+    - alpha_bar(t) = f(t) / f(0) where f(t) = cos²((t + s)/(1 + s) * π/2)
+    - signal_rates = sqrt(alpha_bar)
+    - noise_rates = sqrt(1 - alpha_bar)
+    - Guaranteed: signal_rates² + noise_rates² = 1.0
+    
+    Args:
+        diffusion_times: tensor of shape (batch_size, 1, 1, 1), values in [0, 1]
+            t=0 means clean image, t=1 means pure noise
+    
+    Returns:
+        noise_rates: sqrt(1 - alpha_bar), range [0, ~1]
+        signal_rates: sqrt(alpha_bar), range [~0, 1]
+        Guaranteed: noise_rates² + signal_rates² = 1.0
+    """
+    # Cosine schedule with small offset to prevent singularities at t=0 and t=1
+    s = 0.008
+    
+    # Ensure diffusion_times are in [0, 1]
+    diffusion_times = torch.clamp(diffusion_times, min=0.0, max=1.0)
+    
+    # Compute f(t) = cos²((t + s)/(1 + s) * π/2)
+    angles = (diffusion_times + s) / (1.0 + s) * (math.pi / 2.0)
+    f_t = torch.cos(angles) ** 2
+    
+    # Compute f(0) for normalization
+    f_0 = math.cos(s / (1.0 + s) * math.pi / 2.0) ** 2
+    
+    # alpha_bar(t) = f(t) / f(0)
+    # This ensures alpha_bar(0) ≈ 1 and alpha_bar(1) ≈ 0
+    alpha_bar = f_t / f_0
+    
+    # Clamp to prevent numerical issues
+    alpha_bar = torch.clamp(alpha_bar, min=1e-5, max=0.9999)
+    
+    # Compute rates: signal_rates = sqrt(alpha_bar), noise_rates = sqrt(1 - alpha_bar)
+    signal_rates = torch.sqrt(alpha_bar)
+    noise_rates = torch.sqrt(1.0 - alpha_bar)
+    
+    # Verify the constraint (optional, for debugging - can be removed in production)
+    # sum_squares = signal_rates**2 + noise_rates**2
+    # assert torch.allclose(sum_squares, torch.ones_like(sum_squares), atol=1e-4), \
+    #     f"Constraint violated: signal_rates² + noise_rates² = {sum_squares.mean().item():.6f}"
+    
     return noise_rates, signal_rates
 
 
@@ -526,7 +586,22 @@ class DiffusionModel(nn.Module):
         self.normalizer_std = std
     
     def denormalize(self, x):
-        return torch.clamp(x * self.normalizer_std + self.normalizer_mean, 0.0, 1.0)
+        """
+        Denormalize images from normalized range back to [0, 1]
+        For images normalized to [-1, 1]: mean=0, std=0.5 (so x*0.5 gives [-0.5, 0.5], add 0.5 gives [0, 1])
+        Actually: if input is [-1, 1], denormalize = (x + 1) / 2
+        But we use standard normalization: (x - mean) / std, so denormalize = x * std + mean
+        For [-1, 1] normalization: mean=0, std=0.5, so x*0.5, but that gives [-0.5, 0.5]
+        Correct formula: if normalized as (x - 0.5) / 0.5, then denormalize = x * 0.5 + 0.5
+        But we normalize as (x - 0.5) / 0.5, so x -> (x - 0.5) / 0.5 = 2x - 1, so denormalize = (x + 1) / 2
+        """
+        # If normalizer is not set (default 0.0, 1.0), assume images are already in [0, 1]
+        if self.normalizer_mean == 0.0 and self.normalizer_std == 1.0:
+            # Images are normalized to [-1, 1], convert back to [0, 1]
+            x = (x + 1.0) / 2.0
+        else:
+            x = x * self.normalizer_std + self.normalizer_mean
+        return torch.clamp(x, 0.0, 1.0)
     
     def denoise(self, noisy_images, noise_rates, signal_rates, training):
         if training:
@@ -537,23 +612,102 @@ class DiffusionModel(nn.Module):
             network.eval()
         
         pred_noises = network(noisy_images, noise_rates ** 2)
-        pred_images = (noisy_images - noise_rates * pred_noises) / signal_rates
+        
+        # CRITICAL FIX: Prevent division by zero or very small signal_rates
+        # When signal_rates is close to 0, division causes numerical explosion
+        # Add epsilon to signal_rates for numerical stability
+        eps = 1e-7
+        signal_rates_safe = torch.clamp(signal_rates, min=eps)
+        
+        # Predict clean images: x = (noisy - noise * pred_noise) / signal
+        pred_images = (noisy_images - noise_rates * pred_noises) / signal_rates_safe
+        
+        # Additional stability: clip predicted images to reasonable range
+        # Since we normalize to [-1, 1], clip to slightly larger range to allow some flexibility
+        pred_images = torch.clamp(pred_images, min=-2.0, max=2.0)
+        
         return pred_noises, pred_images
     
     def reverse_diffusion(self, initial_noise, diffusion_steps):
+        """
+        Reverse diffusion process: generate images from noise using standard DDPM sampling.
+        
+        Standard DDPM sampling formula:
+        1. Predict noise: pred_noise = model(x_t, t)
+        2. Predict x0: pred_x0 = (x_t - noise_rate_t * pred_noise) / signal_rate_t
+        3. Compute x_{t-1}: x_{t-1} = signal_rate_{t-1} * pred_x0 + noise_rate_{t-1} * pred_noise + sigma_t * z
+        
+        Process:
+        1. Start from pure noise (t=1.0)
+        2. Gradually denoise step by step (t -> 0.0)
+        3. At each step, predict noise and reconstruct cleaner image
+        4. Use EMA model for stable generation
+        
+        Args:
+            initial_noise: Pure noise tensor from N(0,1), shape (batch, channels, H, W)
+            diffusion_steps: Number of denoising steps (typically 1000 for DDPM)
+        
+        Returns:
+            Generated images in normalized range (typically [-1, 1])
+        """
         step_size = 1.0 / diffusion_steps
-        current_images = initial_noise
+        current_images = initial_noise  # Start from pure noise
         
         for step in range(diffusion_steps):
-            t = torch.ones((initial_noise.shape[0], 1, 1, 1), device=initial_noise.device) * (1 - step * step_size)
-            noise_rates, signal_rates = self.schedule_fn(t)
-            pred_noises, pred_images = self.denoise(current_images, noise_rates, signal_rates, training=False)
+            # Current time step: t goes from 1.0 (pure noise) to 0.0 (clean image)
+            # For step i: t = 1.0 - i * step_size
+            t = torch.ones((initial_noise.shape[0], 1, 1, 1), device=initial_noise.device) * (1.0 - step * step_size)
+            t = torch.clamp(t, min=0.0, max=1.0)
             
-            next_diffusion_times = t - step_size
-            next_noise_rates, next_signal_rates = self.schedule_fn(next_diffusion_times)
-            current_images = next_signal_rates * pred_images + next_noise_rates * torch.randn_like(pred_images)
+            # Get noise and signal rates for current time step t
+            noise_rates_t, signal_rates_t = self.schedule_fn(t)
+            
+            # Predict noise using EMA model (training=False ensures we use ema_network)
+            pred_noises, pred_x0 = self.denoise(current_images, noise_rates_t, signal_rates_t, training=False)
+            
+            # Check for numerical issues
+            if torch.isnan(pred_x0).any() or torch.isinf(pred_x0).any():
+                print(f"⚠️  Warning: pred_x0 contains NaN/Inf at step {step}/{diffusion_steps}, using previous image")
+                break
+            
+            # Clamp predicted x0 to valid range (data is in [-1, 1])
+            pred_x0 = torch.clamp(pred_x0, min=-1.0, max=1.0)
+            
+            # Calculate previous time step t_prev = t - step_size
+            t_prev = t - step_size
+            t_prev = torch.clamp(t_prev, min=0.0, max=1.0)
+            
+            # Get noise and signal rates for previous time step t_prev
+            noise_rates_prev, signal_rates_prev = self.schedule_fn(t_prev)
+            
+            # Standard DDPM sampling formula:
+            # x_{t-1} = sqrt(alpha_bar_{t-1}) * pred_x0 + sqrt(1 - alpha_bar_{t-1}) * pred_noise + sigma_t * z
+            # In our formulation: x_{t-1} = signal_rate_{t-1} * pred_x0 + noise_rate_{t-1} * pred_noise + noise
+            
+            # CRITICAL FIX: At the last step (t=0), use predicted x0 directly without adding noise
+            if step == diffusion_steps - 1:
+                # Final step: use predicted x0 directly (no noise)
+                current_images = pred_x0
+            else:
+                # Standard DDPM sampling formula:
+                # x_{t-1} = sqrt(alpha_bar_{t-1}) * pred_x0 + sqrt(1 - alpha_bar_{t-1}) * pred_noise
+                # In our formulation:
+                # x_{t-1} = signal_rate_{t-1} * pred_x0 + noise_rate_{t-1} * pred_noise
+                
+                # CRITICAL FIX: Use predicted noise (pred_noises) in the reconstruction
+                # This is the key difference from the previous bug where we used random noise
+                current_images = signal_rates_prev * pred_x0 + noise_rates_prev * pred_noises
+                
+                # For deterministic sampling (DDIM-like), we don't add extra noise
+                # For stochastic DDPM sampling, we would add: sigma_t * random_noise
+                # But for now, use deterministic sampling for better stability
+                # If needed, can add: sigma_t = 0.01 * noise_rates_prev; current_images += sigma_t * torch.randn_like(current_images)
+            
+            # Clamp to prevent explosion (normalized range [-1, 1], allow slight overflow)
+            current_images = torch.clamp(current_images, min=-2.0, max=2.0)
         
-        return pred_images
+        # Return final denoised images
+        return current_images
     
     def generate(self, num_images, diffusion_steps, image_size=64, initial_noise=None):
         if initial_noise is None:
